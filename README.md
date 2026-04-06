@@ -4,19 +4,19 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-V3.0.1--M4-blue" alt="Version"/>
-  <img src="https://img.shields.io/badge/LiveCodeBench-74.6%25_pass%401--v(k%3D3)-green" alt="LCB"/>
   <img src="https://img.shields.io/badge/Apple_Silicon-M1%20|%20M2%20|%20M3%20|%20M4-orange" alt="Apple Silicon"/>
+  <img src="https://img.shields.io/badge/benchmarks-pending-lightgrey" alt="Benchmarks"/>
   <img src="https://img.shields.io/badge/license-Source%20Available-blue" alt="License"/>
 </p>
 
 <h1 align="center">A.T.L.A.S-M4</h1>
 <p align="center"><b>Adaptive Test-time Learning and Autonomous Specialization — Apple Silicon Fork</b></p>
 
-An Apple Silicon adaptation of [ATLAS](https://github.com/itigges22/ATLAS), the pipeline that achieves **74.6% LiveCodeBench pass@1-v(k=3)** with a frozen local model on a single device. This fork replaces NVIDIA CUDA with Apple Metal, letting you run the full ATLAS V3 pipeline on a Mac.
+An Apple Silicon port of [ATLAS](https://github.com/itigges22/ATLAS). Runs the V3 pipeline on a Mac using Metal GPU acceleration instead of NVIDIA CUDA.
 
-The premise is the same: wrap a frozen smaller model in intelligent infrastructure — structured generation, energy-based verification, self-verified repair — and it competes with frontier API models. No fine-tuning, no API calls, no cloud. **One Mac, one script.**
+This fork differs from upstream in meaningful ways — different model (Qwen3.5-9B vs Qwen3-14B), different quantization (Q4_K_M on 16GB machines), different context lengths, different hardware characteristics. **We do not inherit upstream's benchmark numbers.** Our own benchmarks are in progress.
 
-> **Fork of** [itigges22/ATLAS](https://github.com/itigges22/ATLAS). All credit for the ATLAS pipeline architecture, V3 methodology, and benchmark results goes to the original author.
+> **Fork of** [itigges22/ATLAS](https://github.com/itigges22/ATLAS). Pipeline architecture and V3 methodology by the original author.
 
 ---
 
@@ -55,18 +55,29 @@ Everything else is installed automatically.
 
 ---
 
-## How It Differs From Upstream ATLAS
+## What Changed From Upstream
 
-Upstream ATLAS targets Linux with NVIDIA GPUs. This fork makes one architectural change: **llama-server runs natively on macOS** (Metal GPU) while the remaining 4 services run in Docker Desktop. The pipeline logic is identical.
+This isn't a thin wrapper. The deployment model is fundamentally different.
 
-| Component | Upstream | This Fork |
-|-----------|----------|-----------|
-| GPU backend | CUDA (NVIDIA) | **Metal (Apple Silicon)** |
-| llama-server | Docker container | **Native macOS process** |
-| Other services | Docker on Linux | Docker Desktop for Mac |
-| Container → LLM routing | `http://llama-server:8080` | `http://host.docker.internal:8080` |
-| Deployment | K3s / Docker Compose | **Docker Compose only** |
-| Install | `scripts/install.sh` (requires root, K3s, GPU Operator) | **`scripts/atlas-macos.sh`** (one script, no root) |
+| | Upstream ATLAS | ATLAS-M4 |
+|---|---|---|
+| **GPU** | NVIDIA CUDA | Apple Metal |
+| **Model** | Qwen3-14B (Q4_K_M / Q6_K) | Qwen3.5-9B (Q4_K_M / Q6_K) |
+| **llama-server** | Docker container (Linux) | Native macOS process |
+| **Deployment** | K3s / Docker Compose / bare metal | Docker Compose only |
+| **Install** | `scripts/install.sh` (root, K3s, GPU Operator) | `scripts/atlas-macos.sh` (one script, no root) |
+| **Container → LLM** | `http://llama-server:8080` (Docker network) | `http://host.docker.internal:8080` (Docker Desktop bridge) |
+| **Parallelism** | Up to 4 slots, 164K context | Memory-dependent (see below) |
+| **Benchmarks** | 74.6% LCB pass@1-v(k=3) on Qwen3-14B | **Not yet benchmarked** |
+
+### Why the benchmarks don't carry over
+
+- **Different model.** Upstream's 74.6% was on Qwen3-14B. We run Qwen3.5-9B — a different architecture (DeltaNet hybrid vs standard transformer), different parameter count, different training data.
+- **Different quantization on 16GB.** Upstream tested Q4_K_M on a GPU with 16GB of dedicated VRAM. On a 16GB Mac, unified memory is shared with the OS, so we have less effective memory for the model and shorter context windows.
+- **Different context length.** Upstream runs 164K context with 4 parallel slots. A 16GB Mac runs 32K context with 1 slot. Context length affects pipeline stages that rely on long prompts (PlanSearch, PR-CoT repair).
+- **Different inference characteristics.** Metal's throughput profile and memory bandwidth differ from CUDA. This changes generation speed, which affects timeout-sensitive pipeline stages.
+
+The pipeline *logic* is identical. But the inputs to that pipeline (model quality, context budget, parallelism) are different enough that upstream scores don't apply.
 
 ### Memory Configurations
 
@@ -77,6 +88,26 @@ The entrypoint auto-tunes based on your Mac's unified memory:
 | 16GB (M4 Mini) | Qwen3.5-9B **Q4_K_M** | 1 | 32K | ~30-40 |
 | 24GB (M4 Pro) | Qwen3.5-9B **Q6_K** | 2 | 64K | ~40-50 |
 | 36GB+ (M4 Max) | Qwen3.5-9B **Q6_K** | 4 | 164K | ~50-60 |
+
+---
+
+## Benchmarks
+
+**Status: Pending.**
+
+We plan to run our own benchmarks on Apple Silicon hardware to establish real numbers for this configuration. The benchmark runner from upstream (`scripts/run_full_benchmarks.sh`) is included and compatible.
+
+Planned benchmarks:
+- LiveCodeBench v5 — Qwen3.5-9B Q4_K_M on M4 16GB (our primary target)
+- LiveCodeBench v5 — Qwen3.5-9B Q6_K on M4 Pro 24GB
+- CLI reliability suite (L1-L8) on Apple Silicon
+- Throughput: tok/s across M4 / M4 Pro / M4 Max
+
+Results will be published here once complete. We will not claim upstream's numbers.
+
+### Cost
+
+ATLAS costs only electricity. M-series chips draw 15-40W for GPU workloads vs 165W for the RTX 5060 Ti, so per-task energy cost is substantially lower.
 
 ---
 
@@ -120,49 +151,6 @@ Point it at `http://localhost:8090` as the base URL. Works with Aider, Continue,
 
 ---
 
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| **`scripts/atlas-macos.sh`** | **Main entry point** — auto-detects and handles everything |
-| `scripts/check-llama.sh` | Validate a running llama-server (8 connectivity + capability checks) |
-| `scripts/verify-macos.sh` | Health check all 5 services + hardware summary |
-| `scripts/build-llama-metal.sh` | Build llama.cpp from source with Metal |
-| `scripts/download-models-macos.sh` | Download Qwen3.5-9B (auto-selects quantization) |
-| `scripts/stop-macos.sh` | Shut down all services |
-
-For most users, only `atlas-macos.sh` is needed. The other scripts exist for debugging and advanced use.
-
----
-
-## Benchmark Results
-
-> These results are from the **upstream ATLAS project** on NVIDIA hardware. The pipeline logic is identical on Apple Silicon — same scores, different wall-clock time.
-
-| Benchmark | Score | Hardware | Method |
-|-----------|-------|----------|--------|
-| **LiveCodeBench v5** | **74.6% pass@1-v(k=3)** | RTX 5060 Ti 16GB | V3 pipeline: PlanSearch + self-verified PR-CoT repair |
-
-<details>
-<summary><b>V3 ablation breakdown (Qwen3-14B, upstream)</b></summary>
-
-| Condition | Configuration | Pass Rate | Delta |
-|-----------|---------------|-----------|-------|
-| A | Baseline (no V3) | 54.9% | — |
-| B | +Phase 1 (PlanSearch + BudgetForcing + DivSampling) | 67.3% | +12.4pp |
-| C | +Phase 1+2 (Lens routing) | 67.3% | +0.0pp |
-| D | +Phase 1+3 (self-verified refinement) | **74.6%** | +7.3pp |
-
-Full report: [V3_ABLATION_STUDY.md](docs/reports/V3_ABLATION_STUDY.md)
-
-</details>
-
-### Cost
-
-ATLAS costs only electricity. On Apple Silicon, the M-series chips draw 15-40W for GPU workloads vs 165W for the RTX 5060 Ti — making per-task cost even lower than upstream's ~$0.004/task estimate.
-
----
-
 ## Architecture
 
 ```
@@ -198,6 +186,21 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ---
 
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| **`scripts/atlas-macos.sh`** | **Main entry point** — auto-detects and handles everything |
+| `scripts/check-llama.sh` | Validate a running llama-server (8 connectivity + capability checks) |
+| `scripts/verify-macos.sh` | Health check all 5 services + hardware summary |
+| `scripts/build-llama-metal.sh` | Build llama.cpp from source with Metal |
+| `scripts/download-models-macos.sh` | Download Qwen3.5-9B (auto-selects quantization) |
+| `scripts/stop-macos.sh` | Shut down all services |
+
+For most users, only `atlas-macos.sh` is needed.
+
+---
+
 ## Hardware Requirements
 
 | Resource | Minimum | Recommended |
@@ -212,10 +215,11 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Known Limitations
 
-- **16GB Macs run with reduced settings.** Single inference slot, 32K context, Q4_K_M quantization. Works, but slower and shorter context than 24GB+ machines.
-- **Docker Desktop sandbox is weaker than Linux.** The `read_only` + `no-new-privileges` + `tmpfs` security flags work but the isolation is less strict than bare Linux.
-- **9B model not yet formally benchmarked.** The 74.6% result was on Qwen3-14B upstream. Qwen3.5-9B with the same pipeline should score similarly or higher based on published baselines, but formal benchmarks are pending.
-- **No K3s path.** Upstream supports K3s/Kubernetes deployment. This fork is Docker Compose only — simpler for single-machine macOS, but no orchestration benefits.
+- **No benchmarks yet.** We have not validated pipeline performance on this hardware/model combination. Upstream scores do not apply.
+- **16GB Macs run with reduced settings.** Single inference slot, 32K context, Q4_K_M quantization. Functional, but the pipeline has less room to work with than on upstream's 16GB dedicated VRAM setup.
+- **Geometric Lens may need retraining.** The C(x) scoring model was trained on embeddings from upstream's model. Qwen3.5-9B produces 4096-dim embeddings (same dimensionality), but the embedding distribution may differ enough to affect scoring accuracy.
+- **Docker Desktop sandbox is weaker than Linux.** Security isolation is less strict than bare Linux containers.
+- **No K3s path.** Docker Compose only — simpler for single-machine macOS, but no orchestration.
 
 ---
 
@@ -223,13 +227,12 @@ Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 | Document | Description |
 |----------|-------------|
-| **[SETUP.md](docs/SETUP.md)** | Upstream installation guide (Linux/NVIDIA) |
 | **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Two-layer architecture, component design |
 | **[CLI.md](docs/CLI.md)** | CLI usage, streaming output |
 | **[API.md](docs/API.md)** | HTTP API endpoints and formats |
 | **[CONFIGURATION.md](docs/CONFIGURATION.md)** | Environment variables and config |
 | **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Common issues and solutions |
-| **[V3_ABLATION_STUDY.md](docs/reports/V3_ABLATION_STUDY.md)** | Ablation methodology and results |
+| **[V3_ABLATION_STUDY.md](docs/reports/V3_ABLATION_STUDY.md)** | Upstream ablation methodology and results |
 | **[CHANGELOG.md](CHANGELOG.md)** | Release history |
 
 ---
@@ -240,4 +243,4 @@ Licensed under the [A.T.L.A.S Source Available License v1.0](LICENSE).
 
 ## Acknowledgments
 
-ATLAS was created by [Isaac Tigges](https://github.com/itigges22) at Virginia Tech. This fork adapts it for Apple Silicon. All pipeline design, benchmark methodology, and research credit belongs to the original project.
+ATLAS was created by [Isaac Tigges](https://github.com/itigges22). This fork adapts it for Apple Silicon. Pipeline design, V3 methodology, and benchmark infrastructure by the original project.
