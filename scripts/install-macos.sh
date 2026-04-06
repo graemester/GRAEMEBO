@@ -12,6 +12,12 @@ set -euo pipefail
 #
 # No K3s, no GPU Operator, no Kubernetes.
 # Single-machine deployment via Docker Compose + native llama-server.
+#
+# If you already have llama-server running with Metal:
+#   ./scripts/install-macos.sh --skip-llama
+# This skips building llama.cpp and downloading the model, and only
+# sets up the Docker services. Then launch with:
+#   ./scripts/start-macos.sh --external-llama [port]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -25,6 +31,13 @@ NC='\033[0m'
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+SKIP_LLAMA=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-llama) SKIP_LLAMA=true ;;
+    esac
+done
 
 # --- Step 1: Check platform ---
 check_platform() {
@@ -171,8 +184,13 @@ main() {
     # Show installation plan
     echo "Installation plan:"
     echo "  1. Check/install dependencies (Homebrew, cmake, Docker)"
-    echo "  2. Build llama.cpp with Metal GPU backend"
-    echo "  3. Download Qwen3.5-9B model ($ATLAS_MAIN_MODEL)"
+    if [[ "$SKIP_LLAMA" == "true" ]]; then
+        echo "  2. Build llama.cpp:        SKIP (--skip-llama)"
+        echo "  3. Download model:         SKIP (--skip-llama)"
+    else
+        echo "  2. Build llama.cpp with Metal GPU backend"
+        echo "  3. Download Qwen3.5-9B model ($ATLAS_MAIN_MODEL)"
+    fi
     echo "  4. Build Docker images (geometric-lens, v3-service, sandbox, atlas-proxy)"
     echo "  5. Create data directories"
     echo ""
@@ -189,8 +207,12 @@ main() {
     echo ""
     install_dependencies
     create_directories
-    build_llama
-    download_model
+    if [[ "$SKIP_LLAMA" == "true" ]]; then
+        log_info "Skipping llama.cpp build and model download (--skip-llama)"
+    else
+        build_llama
+        download_model
+    fi
     build_docker_images
 
     echo ""
@@ -207,7 +229,11 @@ main() {
     echo "  Data dir:   $ATLAS_DATA_DIR"
     echo ""
     echo "Next steps:"
-    echo "  1. Start ATLAS:    ./scripts/start-macos.sh"
+    if [[ "$SKIP_LLAMA" == "true" ]]; then
+        echo "  1. Start ATLAS:    ./scripts/start-macos.sh --external-llama [port]"
+    else
+        echo "  1. Start ATLAS:    ./scripts/start-macos.sh"
+    fi
     echo "  2. Verify health:  ./scripts/verify-macos.sh"
     echo "  3. Stop ATLAS:     ./scripts/stop-macos.sh"
     echo ""

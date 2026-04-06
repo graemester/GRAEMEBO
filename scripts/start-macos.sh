@@ -8,8 +8,11 @@ set -euo pipefail
 #   2. geometric-lens, v3-service, sandbox, atlas-proxy (Docker)
 #
 # Usage:
-#   ./scripts/start-macos.sh          # start everything
-#   ./scripts/start-macos.sh --build  # rebuild Docker images first
+#   ./scripts/start-macos.sh                          # start everything
+#   ./scripts/start-macos.sh --build                  # rebuild Docker images first
+#   ./scripts/start-macos.sh --external-llama         # skip llama-server (already running on :8080)
+#   ./scripts/start-macos.sh --external-llama 9090    # already running on custom port
+#   ATLAS_LLAMA_PORT=9090 ./scripts/start-macos.sh    # same via env var
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -28,10 +31,21 @@ LLAMA_PORT="${ATLAS_LLAMA_PORT:-8080}"
 LLAMA_PID_FILE="$REPO_DIR/.llama-server.pid"
 LLAMA_LOG_FILE="$REPO_DIR/logs/llama-server.log"
 BUILD_FLAG=false
+EXTERNAL_LLAMA=false
 
-for arg in "$@"; do
-    case "$arg" in
-        --build) BUILD_FLAG=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build) BUILD_FLAG=true; shift ;;
+        --external-llama)
+            EXTERNAL_LLAMA=true
+            # Optional: next arg can be a port number
+            if [[ ${2:-} =~ ^[0-9]+$ ]]; then
+                LLAMA_PORT="$2"
+                shift
+            fi
+            shift
+            ;;
+        *) shift ;;
     esac
 done
 
@@ -45,24 +59,38 @@ preflight() {
         exit 1
     fi
 
-    # Check llama-server binary
-    if ! command -v llama-server &>/dev/null; then
-        log_error "llama-server not found in PATH"
-        log_error "Build it first: ./scripts/build-llama-metal.sh"
-        exit 1
+    if [[ "$EXTERNAL_LLAMA" == "true" ]]; then
+        log_info "External llama-server mode — skipping binary/model checks"
+        log_info "Expecting llama-server at http://localhost:$LLAMA_PORT"
+
+        # Verify it's actually reachable
+        if ! curl -sf --max-time 5 "http://localhost:$LLAMA_PORT/health" &>/dev/null; then
+            log_error "Cannot reach llama-server at http://localhost:$LLAMA_PORT/health"
+            log_error "Make sure it's running before using --external-llama"
+            exit 1
+        fi
+        log_info "External llama-server is healthy"
+    else
+        # Check llama-server binary
+        if ! command -v llama-server &>/dev/null; then
+            log_error "llama-server not found in PATH"
+            log_error "Build it first: ./scripts/build-llama-metal.sh"
+            log_error "Or use --external-llama if it's already running"
+            exit 1
+        fi
+
+        # Check model file
+        local model_file="$ATLAS_MODELS_DIR/$ATLAS_MAIN_MODEL"
+        if [[ ! -f "$model_file" ]]; then
+            log_error "Model not found: $model_file"
+            log_error "Download it: ./scripts/download-models-macos.sh"
+            exit 1
+        fi
     fi
 
     # Check Docker Desktop
     if ! docker info &>/dev/null; then
         log_error "Docker is not running. Start Docker Desktop first."
-        exit 1
-    fi
-
-    # Check model file
-    local model_file="$ATLAS_MODELS_DIR/$ATLAS_MAIN_MODEL"
-    if [[ ! -f "$model_file" ]]; then
-        log_error "Model not found: $model_file"
-        log_error "Download it: ./scripts/download-models-macos.sh"
         exit 1
     fi
 
@@ -192,7 +220,11 @@ main() {
     echo ""
 
     preflight
-    start_llama
+    if [[ "$EXTERNAL_LLAMA" == "false" ]]; then
+        start_llama
+    else
+        log_info "Using external llama-server on port $LLAMA_PORT"
+    fi
     start_docker_services
     health_check_all
 
