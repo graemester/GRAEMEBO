@@ -49,6 +49,110 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --- Ensure the ATLAS model GGUF is downloaded ---
+ensure_model_available() {
+    # Check common model locations
+    local model_name="$ATLAS_MAIN_MODEL"
+    local search_dirs=(
+        "$ATLAS_MODELS_DIR"
+        "$REPO_DIR/models"
+        "$HOME/.cache/llama.cpp"
+        "$HOME/models"
+    )
+
+    for dir in "${search_dirs[@]}"; do
+        if [[ -f "$dir/$model_name" ]]; then
+            log_info "Model found: $dir/$model_name"
+            ATLAS_MODELS_DIR="$dir"
+            return
+        fi
+    done
+
+    # Model not found anywhere — download it
+    log_warn "Model $model_name not found locally"
+    log_info "Downloading model..."
+    "$SCRIPT_DIR/download-models-macos.sh"
+
+    if [[ ! -f "$ATLAS_MODELS_DIR/$model_name" ]]; then
+        log_error "Model download failed"
+        exit 1
+    fi
+}
+
+# --- Load the ATLAS model into a running llama-server ---
+load_model_if_needed() {
+    local model_name="$ATLAS_MAIN_MODEL"
+    local base_url="http://localhost:$LLAMA_PORT"
+
+    # Check what model is currently loaded
+    local current_model
+    current_model=$(curl -sf --max-time 5 "$base_url/v1/models" 2>/dev/null | \
+        python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin)
+    models = r.get('data', [])
+    for m in models:
+        print(m.get('id', ''))
+except:
+    pass
+" 2>/dev/null || echo "")
+
+    # Check if the right model is already loaded (match by filename stem)
+    local model_stem="${model_name%.gguf}"
+    if echo "$current_model" | grep -qi "qwen3.5-9b\|qwen3_5-9b"; then
+        log_info "Qwen3.5-9B already loaded — no model swap needed"
+        return
+    fi
+
+    if [[ -n "$current_model" ]]; then
+        log_warn "Currently loaded: $current_model"
+        log_warn "ATLAS needs: $model_name"
+    fi
+
+    # Try runtime model load via /models/load (llama.cpp router mode)
+    log_info "Attempting to load $model_name via API..."
+    local model_path="$ATLAS_MODELS_DIR/$model_name"
+
+    local load_resp
+    load_resp=$(curl -sf --max-time 60 "$base_url/models/load" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\": \"$model_path\"}" 2>/dev/null || echo "")
+
+    if [[ -n "$load_resp" ]]; then
+        # Check if it worked
+        sleep 2
+        local new_model
+        new_model=$(curl -sf --max-time 5 "$base_url/v1/models" 2>/dev/null | \
+            python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin)
+    for m in r.get('data', []):
+        print(m.get('id', ''))
+except:
+    pass
+" 2>/dev/null || echo "")
+
+        if echo "$new_model" | grep -qi "qwen3.5-9b\|qwen3_5-9b"; then
+            log_info "Model loaded successfully: $model_name"
+            return
+        fi
+    fi
+
+    # /models/load not available — server may need restart with new model
+    log_warn "Could not load model via API (server may not support /models/load)"
+    log_warn ""
+    log_warn "To use ATLAS with your existing llama-server, restart it with:"
+    log_warn "  llama-server -m $model_path -ngl 99 --embeddings --flash-attn on \\"
+    log_warn "    -c 32768 --cont-batching --host 0.0.0.0 --port $LLAMA_PORT --jinja"
+    log_warn ""
+    log_warn "Or let ATLAS manage llama-server (drops --external-llama):"
+    log_warn "  ./scripts/start-macos.sh"
+    log_warn ""
+    log_warn "Continuing with currently loaded model — results may differ from benchmarks."
+}
+
 # --- Pre-flight checks ---
 preflight() {
     log_info "Pre-flight checks..."
@@ -60,7 +164,7 @@ preflight() {
     fi
 
     if [[ "$EXTERNAL_LLAMA" == "true" ]]; then
-        log_info "External llama-server mode — skipping binary/model checks"
+        log_info "External llama-server mode — using existing server"
         log_info "Expecting llama-server at http://localhost:$LLAMA_PORT"
 
         # Verify it's actually reachable
@@ -70,6 +174,12 @@ preflight() {
             exit 1
         fi
         log_info "External llama-server is healthy"
+
+        # Ensure the ATLAS model is downloaded
+        ensure_model_available
+
+        # Try to load the ATLAS model if not already loaded
+        load_model_if_needed
     else
         # Check llama-server binary
         if ! command -v llama-server &>/dev/null; then
