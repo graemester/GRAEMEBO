@@ -93,9 +93,9 @@ The entrypoint auto-tunes based on your Mac's unified memory:
 
 ## Benchmarks
 
-**Status: Pending.**
+### ATLAS-M4 (This Fork)
 
-We plan to run our own benchmarks on Apple Silicon hardware to establish real numbers for this configuration. The benchmark runner from upstream (`scripts/run_full_benchmarks.sh`) is included and compatible.
+**Status: Pending.** We have not yet validated pipeline performance on Apple Silicon.
 
 Planned benchmarks:
 - LiveCodeBench v5 — Qwen3.5-9B Q4_K_M on M4 16GB (our primary target)
@@ -103,7 +103,29 @@ Planned benchmarks:
 - CLI reliability suite (L1-L8) on Apple Silicon
 - Throughput: tok/s across M4 / M4 Pro / M4 Max
 
-Results will be published here once complete. We will not claim upstream's numbers.
+Results will be published here once complete.
+
+### Upstream Reference (Different Configuration)
+
+For context, the upstream ATLAS project reported these results on different hardware and a different model. **These do not apply to this fork** — see [why the benchmarks don't carry over](#why-the-benchmarks-dont-carry-over) above.
+
+| Benchmark | Score | Model | Hardware |
+|-----------|-------|-------|----------|
+| LiveCodeBench v5 | 74.6% pass@1-v(k=3) | Qwen3-14B Q4_K_M | RTX 5060 Ti 16GB |
+
+<details>
+<summary>Upstream V3 ablation breakdown (Qwen3-14B)</summary>
+
+| Condition | Configuration | Pass Rate | Delta |
+|-----------|---------------|-----------|-------|
+| A | Baseline (no V3) | 54.9% | — |
+| B | +Phase 1 (PlanSearch + BudgetForcing + DivSampling) | 67.3% | +12.4pp |
+| C | +Phase 1+2 (Lens routing) | 67.3% | +0.0pp |
+| D | +Phase 1+3 (self-verified refinement) | 74.6% | +7.3pp |
+
+Source: [V3_ABLATION_STUDY.md](docs/reports/V3_ABLATION_STUDY.md)
+
+</details>
 
 ### Cost
 
