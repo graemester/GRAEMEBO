@@ -358,6 +358,112 @@ health_check_all() {
 }
 
 # ============================================================================
+# PORT CONFLICT DETECTION
+# ============================================================================
+check_ports() {
+    # Ports ATLAS needs. llama-server port is checked separately (may already
+    # be running with a model we can reuse), so we only flag Docker service ports.
+    local docker_ports=(
+        "geometric-lens:${ATLAS_LENS_PORT:-8099}"
+        "v3-service:${ATLAS_V3_PORT:-8070}"
+        "sandbox:${ATLAS_SANDBOX_PORT:-30820}"
+        "atlas-proxy:${ATLAS_PROXY_PORT:-8090}"
+    )
+
+    local conflicts=()
+
+    for entry in "${docker_ports[@]}"; do
+        local name="${entry%%:*}"
+        local port="${entry#*:}"
+
+        # Check if something non-Docker is already on this port
+        local pid
+        pid=$(lsof -ti ":$port" -sTCP:LISTEN 2>/dev/null || true)
+
+        if [[ -n "$pid" ]]; then
+            # Is it one of our own Docker containers? That's fine.
+            local proc_name
+            proc_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
+            if [[ "$proc_name" == *"com.docker"* || "$proc_name" == *"vpnkit"* || "$proc_name" == *"docker"* ]]; then
+                continue
+            fi
+            conflicts+=("$port:$name:$pid:$proc_name")
+        fi
+    done
+
+    if [[ ${#conflicts[@]} -eq 0 ]]; then
+        log_info "All ports available"
+        return
+    fi
+
+    # We have conflicts — try to find alternative ports
+    log_warn "Port conflicts detected:"
+    local any_unresolved=false
+
+    for conflict in "${conflicts[@]}"; do
+        IFS=':' read -r port name pid proc_name <<< "$conflict"
+        log_warn "  Port $port ($name) in use by $proc_name (PID $pid)"
+
+        # Find a free alternative port
+        local alt_port
+        alt_port=$(find_free_port "$port")
+
+        if [[ -n "$alt_port" ]]; then
+            log_info "  Reassigning $name: $port → $alt_port"
+            case "$name" in
+                geometric-lens) export ATLAS_LENS_PORT="$alt_port" ;;
+                v3-service)     export ATLAS_V3_PORT="$alt_port" ;;
+                sandbox)        export ATLAS_SANDBOX_PORT="$alt_port" ;;
+                atlas-proxy)    export ATLAS_PROXY_PORT="$alt_port" ;;
+            esac
+        else
+            log_error "  Could not find free port near $port for $name"
+            any_unresolved=true
+        fi
+    done
+
+    # Also check llama port — if occupied by something that isn't llama-server
+    local llama_pid
+    llama_pid=$(lsof -ti ":$LLAMA_PORT" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$llama_pid" ]]; then
+        # Check if it responds to /health like a llama-server
+        if ! curl -sf --max-time 2 "http://localhost:$LLAMA_PORT/health" &>/dev/null; then
+            local llama_proc
+            llama_proc=$(ps -p "$llama_pid" -o comm= 2>/dev/null || echo "unknown")
+            log_warn "  Port $LLAMA_PORT (llama-server) in use by $llama_proc (PID $llama_pid) — not a llama-server"
+            local alt
+            alt=$(find_free_port "$LLAMA_PORT")
+            if [[ -n "$alt" ]]; then
+                log_info "  Reassigning llama-server: $LLAMA_PORT → $alt"
+                LLAMA_PORT="$alt"
+                export ATLAS_LLAMA_PORT="$alt"
+            else
+                any_unresolved=true
+            fi
+        fi
+        # If it IS a llama-server, we'll handle it in step 5
+    fi
+
+    if [[ "$any_unresolved" == "true" ]]; then
+        log_error "Could not resolve all port conflicts. Free the ports above or set custom ports via env vars:"
+        log_error "  ATLAS_LLAMA_PORT, ATLAS_LENS_PORT, ATLAS_V3_PORT, ATLAS_SANDBOX_PORT, ATLAS_PROXY_PORT"
+        exit 1
+    fi
+}
+
+find_free_port() {
+    local start_port="$1"
+    # Try ports starting from start_port+1, up to start_port+100
+    for (( p = start_port + 1; p <= start_port + 100; p++ )); do
+        if ! lsof -ti ":$p" -sTCP:LISTEN &>/dev/null; then
+            echo "$p"
+            return
+        fi
+    done
+    echo ""
+}
+
+# ============================================================================
 # MAIN LOGIC — detect state, decide actions, execute
 # ============================================================================
 main() {
@@ -388,7 +494,7 @@ main() {
     fi
 
     # ── 1. Docker Desktop ──
-    log_step "1/6 Docker Desktop"
+    log_step "1/7 Docker Desktop"
     if docker info &>/dev/null; then
         log_info "Docker Desktop is running"
     else
@@ -397,8 +503,12 @@ main() {
         exit 1
     fi
 
-    # ── 2. llama-server binary ──
-    log_step "2/6 llama-server binary"
+    # ── 2. Port availability ──
+    log_step "2/7 Port availability"
+    check_ports
+
+    # ── 3. llama-server binary ──
+    log_step "3/7 llama-server binary"
     local llama_binary_state
     llama_binary_state=$(detect_llama_binary)
     if [[ "$llama_binary_state" == "binary_found" ]]; then
@@ -409,8 +519,8 @@ main() {
         build_llama_server
     fi
 
-    # ── 3. Model file ──
-    log_step "3/6 Qwen3.5-9B model"
+    # ── 4. Model file ──
+    log_step "4/7 Qwen3.5-9B model"
     local model_path
     model_path=$(find_model_file)
     if [[ -n "$model_path" ]]; then
@@ -421,8 +531,8 @@ main() {
         model_path="$ATLAS_MODELS_DIR/$ATLAS_MAIN_MODEL"
     fi
 
-    # ── 4. llama-server running with correct model ──
-    log_step "4/6 llama-server process"
+    # ── 5. llama-server running with correct model ──
+    log_step "5/7 llama-server process"
     local server_state
     server_state=$(detect_llama_server)
 
@@ -464,12 +574,12 @@ main() {
         launch_llama_server "$model_path"
     fi
 
-    # ── 5. Docker services ──
-    log_step "5/6 ATLAS Docker services"
+    # ── 6. Docker services ──
+    log_step "6/7 ATLAS Docker services"
     start_docker_services
 
-    # ── 6. Health check ──
-    log_step "6/6 Health check"
+    # ── 7. Health check ──
+    log_step "7/7 Health check"
     health_check_all
 
     echo ""
